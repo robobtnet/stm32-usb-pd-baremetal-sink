@@ -82,6 +82,12 @@ if (PD_BM_Init(&pd_config) == 0U)
 HAL_PWREx_DisableUCPDDeadBattery();
 ```
 
+## Author
+
+Created and tested by Naser Attarzadeh.
+
+Repository owner: robobtnet
+
 ## License
 
 The reusable project code is licensed under the Apache License 2.0.

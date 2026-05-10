@@ -1,3 +1,19 @@
+/*
+ * pd_bm.h
+ *
+ * Minimal bare-metal USB-C Power Delivery sink core for STM32 UCPD.
+ *
+ * Author: Naser Attarzadeh
+ * Repository: https://github.com/robobtnet/stm32-usb-pd-baremetal-sink
+ *
+ * Copyright (c) 2026 Naser Attarzadeh
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * This header defines the portable public API for the PD sink core. Board
+ * details such as clocks, GPIO pins, DMA channels, interrupts, LEDs, and
+ * dead-battery handoff stay in the application layer.
+ */
+
 #ifndef PD_BM_H
 #define PD_BM_H
 

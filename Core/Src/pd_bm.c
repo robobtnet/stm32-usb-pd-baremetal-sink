@@ -1,3 +1,24 @@
+/*
+ * pd_bm.c
+ *
+ * Minimal bare-metal USB-C Power Delivery sink core for STM32 UCPD.
+ *
+ * Author: Naser Attarzadeh
+ * Repository: https://github.com/robobtnet/stm32-usb-pd-baremetal-sink
+ *
+ * Copyright (c) 2026 Naser Attarzadeh
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * This file implements a compact fixed-PDO sink policy engine. It negotiates
+ * source capabilities, requests the highest enabled matching profile, and
+ * falls back to profile 0 when optional profiles are unavailable or rejected.
+ *
+ * The implementation is intentionally independent from board-specific clocks,
+ * GPIO pins, DMA instances, LEDs, and HAL application code. The application
+ * supplies the UCPD instance, millisecond tick, RX DMA callbacks, and profiles
+ * through PD_BM_Config.
+ */
+
 #include "pd_bm.h"
 
 #include <stddef.h>
