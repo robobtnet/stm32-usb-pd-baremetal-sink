@@ -1,0 +1,33 @@
+# Build outputs
+Debug/
+Release/
+build/
+out/
+
+# STM32CubeIDE / Eclipse local state
+.settings/
+*.launch
+.metadata/
+
+# Generated build metadata
+*.o
+*.d
+*.su
+*.cyclo
+*.map
+*.list
+*.elf
+*.bin
+*.hex
+*.lst
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# OS files
+Thumbs.db
+Desktop.ini
