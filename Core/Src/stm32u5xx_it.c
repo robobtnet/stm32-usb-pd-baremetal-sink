@@ -59,6 +59,7 @@
 extern TIM_HandleTypeDef htim17;
 
 /* USER CODE BEGIN EV */
+extern TIM_HandleTypeDef htim16;
 
 /* USER CODE END EV */
 
@@ -268,5 +269,9 @@ void UCPD1_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void TIM16_IRQHandler(void)
+{
+  HAL_TIM_IRQHandler(&htim16);
+}
 
 /* USER CODE END 1 */

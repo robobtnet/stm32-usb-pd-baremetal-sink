@@ -132,7 +132,7 @@ static uint32_t pd_selected_pdo;
 static uint8_t pd_selected_is_epr;
 static uint8_t pd_epr_source_capable;
 static uint8_t pd_source_unchunked_capable;
-static uint8_t pd_epr_mode_active;
+static volatile uint8_t pd_epr_mode_active;
 static volatile uint8_t pd_wants_epr;
 
 #define PD_TRACE(_event_, _a_, _b_, _c_, _d_) \
@@ -164,6 +164,7 @@ static void PD_BM_RequestEprProfile(void);
 static void PD_BM_SendEprModeEnter(void);
 static void PD_BM_SendEprKeepAlive(void);
 static void PD_BM_SendChunkRequest(uint8_t msg_type, uint8_t chunk_number);
+static void PD_BM_ScheduleEprKeepAliveIfDue(void);
 static void PD_BM_RxQueuePushFromISR(uint8_t count);
 static uint8_t PD_BM_RxQueuePop(void);
 static uint8_t PD_BM_SelectProfileFromSourceCaps(int8_t start_index);
@@ -331,14 +332,7 @@ void PD_BM_Task(void)
     PD_BM_SendGetSourceCap();
   }
 
-  if ((pd_epr_mode_active != 0U) && (pd_state == PD_BM_STATE_EPR_READY)
-      && ((PD_BM_Tick() - pd_last_epr_keepalive_tick) >= PD_EPR_KEEPALIVE_MS)
-      && (pd_tx_busy == 0U)
-      && (pd_rx_ready == 0U))
-  {
-    pd_last_epr_keepalive_tick = PD_BM_Tick();
-    pd_epr_keepalive_pending = 1U;
-  }
+  PD_BM_ScheduleEprKeepAliveIfDue();
 }
 
 uint8_t PD_BM_NeedsService(void)
@@ -378,6 +372,17 @@ uint8_t PD_BM_NeedsService(void)
   }
 
   return 0U;
+}
+
+void PD_BM_TimerTickISR(void)
+{
+  if ((pd_cfg.ucpd == NULL) || (pd_cfg.get_tick_ms == NULL))
+  {
+    return;
+  }
+
+  /* Keep PD transmit out of the timer ISR; this only wakes the main task. */
+  PD_BM_ScheduleEprKeepAliveIfDue();
 }
 
 void PD_BM_IRQHandler(void)
@@ -1372,6 +1377,22 @@ static void PD_BM_SendChunkRequest(uint8_t msg_type, uint8_t chunk_number)
   else
   {
     PD_TRACE("tx_chunk_req_fail", msg_type, chunk_number, 0U, 0U);
+  }
+}
+
+static void PD_BM_ScheduleEprKeepAliveIfDue(void)
+{
+  uint32_t now = PD_BM_Tick();
+
+  if ((pd_epr_keepalive_pending == 0U)
+      && (pd_epr_mode_active != 0U)
+      && (pd_state == PD_BM_STATE_EPR_READY)
+      && ((now - pd_last_epr_keepalive_tick) >= PD_EPR_KEEPALIVE_MS)
+      && (pd_tx_busy == 0U)
+      && (pd_rx_ready == 0U))
+  {
+    pd_last_epr_keepalive_tick = now;
+    pd_epr_keepalive_pending = 1U;
   }
 }
 

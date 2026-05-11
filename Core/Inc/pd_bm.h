@@ -84,6 +84,7 @@ uint8_t PD_BM_Init(const PD_BM_Config *config);
 uint8_t PD_BM_NeedsService(void);
 void PD_BM_Task(void);
 void PD_BM_IRQHandler(void);
+void PD_BM_TimerTickISR(void);
 
 PD_BM_State PD_BM_GetState(void);
 uint16_t PD_BM_GetRequestedVoltage(void);

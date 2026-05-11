@@ -32,6 +32,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define PD_APP_TRACE_QUEUE_LEN 512U
+#define PD_APP_TIMER_HZ 1000U
+#define PD_APP_TIMER_BASE_HZ 1000000U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -59,6 +61,7 @@ static PD_AppTraceRecord pd_app_trace_queue[PD_APP_TRACE_QUEUE_LEN];
 static volatile uint16_t pd_app_trace_head;
 static volatile uint16_t pd_app_trace_tail;
 static volatile uint16_t pd_app_trace_lost;
+TIM_HandleTypeDef htim16;
 
 /*
  * Idle dwell required in DETACHED before we let the trace flush. Fast
@@ -83,6 +86,7 @@ static void PD_App_RxDmaStop(void *user);
 static uint16_t PD_App_RxDmaCount(void *user);
 static void PD_App_Trace(const char *event, uint32_t a, uint32_t b, uint32_t c, uint32_t d, void *user);
 static void PD_App_TraceFlush(void);
+static void PD_App_TIM16_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -126,6 +130,11 @@ int main(void)
   MX_ICACHE_Init();
   MX_UCPD1_Init();
   /* USER CODE BEGIN 2 */
+  PD_App_TIM16_Init();
+  if (HAL_TIM_Base_Start_IT(&htim16) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
@@ -588,6 +597,54 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static void PD_App_TIM16_Init(void)
+{
+  RCC_ClkInitTypeDef clock_config;
+  uint32_t flash_latency;
+  uint32_t tim_clk_hz;
+  uint32_t prescaler;
+  uint32_t period;
+
+  HAL_RCC_GetClockConfig(&clock_config, &flash_latency);
+  (void)flash_latency;
+
+  tim_clk_hz = HAL_RCC_GetPCLK2Freq();
+  if (clock_config.APB2CLKDivider != RCC_HCLK_DIV1)
+  {
+    tim_clk_hz *= 2U;
+  }
+
+  prescaler = tim_clk_hz / PD_APP_TIMER_BASE_HZ;
+  if (prescaler == 0U)
+  {
+    prescaler = 1U;
+  }
+
+  period = (tim_clk_hz / prescaler) / PD_APP_TIMER_HZ;
+  if (period == 0U)
+  {
+    period = 1U;
+  }
+
+  __HAL_RCC_TIM16_CLK_ENABLE();
+
+  htim16.Instance = TIM16;
+  htim16.Init.Prescaler = prescaler - 1U;
+  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim16.Init.Period = period - 1U;
+  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim16.Init.RepetitionCounter = 0U;
+  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+
+  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  HAL_NVIC_SetPriority(TIM16_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(TIM16_IRQn);
+}
+
 static uint32_t PD_App_GetTick(void *user)
 {
   (void)user;
@@ -693,6 +750,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
+  if (htim->Instance == TIM16)
+  {
+    PD_BM_TimerTickISR();
+  }
 
   /* USER CODE END Callback 1 */
 }
