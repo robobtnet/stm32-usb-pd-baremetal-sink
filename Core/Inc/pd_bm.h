@@ -24,6 +24,20 @@ extern "C" {
 #include <stdint.h>
 
 #ifndef PD_BM_STM32_LL_UCPD_HEADER
+#if defined(__has_include)
+#if __has_include("stm32g4xx_ll_ucpd.h")
+#define PD_BM_STM32_LL_UCPD_HEADER "stm32g4xx_ll_ucpd.h"
+#elif __has_include("stm32u5xx_ll_ucpd.h")
+#define PD_BM_STM32_LL_UCPD_HEADER "stm32u5xx_ll_ucpd.h"
+#elif __has_include("stm32g0xx_ll_ucpd.h")
+#define PD_BM_STM32_LL_UCPD_HEADER "stm32g0xx_ll_ucpd.h"
+#elif __has_include("stm32l5xx_ll_ucpd.h")
+#define PD_BM_STM32_LL_UCPD_HEADER "stm32l5xx_ll_ucpd.h"
+#endif
+#endif
+#endif
+
+#ifndef PD_BM_STM32_LL_UCPD_HEADER
 #define PD_BM_STM32_LL_UCPD_HEADER "stm32g4xx_ll_ucpd.h"
 #endif
 

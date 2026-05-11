@@ -249,14 +249,14 @@ For `UCPD2`, use the `UCPD2_IRQHandler()` generated for your MCU and call the sa
 /* USER CODE END Includes */
 ```
 
-For non-STM32G4 projects, override the LL UCPD include before including `pd_bm.h`:
+`pd_bm.h` tries to auto-detect the available STM32 LL UCPD header with `__has_include`. For non-STM32G4 projects, you can still override the LL UCPD include before including `pd_bm.h`:
 
 ```c
 #define PD_BM_STM32_LL_UCPD_HEADER "stm32xxxx_ll_ucpd.h"
 #include "pd_bm.h"
 ```
 
-Replace `stm32xxxx_ll_ucpd.h` with the correct header for your STM32 family.
+Replace `stm32xxxx_ll_ucpd.h` with the correct header for your STM32 family. This define must be visible when compiling both `main.c` and `pd_bm.c`; if you use a compiler symbol instead of a source define, apply it project-wide.
 
 ### 2. Add RX DMA State
 
@@ -454,6 +454,62 @@ If your RX DMA is not `DMA1_Channel1`, update:
 - `CPAR`, `CMAR`, and `CNDTR` channel references.
 - DMA clear flag function.
 - DMA request in CubeMX.
+
+## STM32U5 / GPDMA Porting Notes
+
+STM32U projects, such as STM32U575, can use the same `pd_bm.c` and `pd_bm.h`. The PD core does not need U-specific code. Only the application glue changes because STM32U5 uses GPDMA instead of the classic DMA channel registers used by the G474 example.
+
+CubeMX/CubeIDE checklist for a U5 project:
+
+- Enable the UCPD instance, for example `UCPD1`.
+- Assign the real CC pins for your package. One tested U5 setup used `PA15 -> UCPD1_CC1` and `PB15 -> UCPD1_CC2`.
+- Enable `GPDMA1`.
+- Add a DMA request for `UCPD1_RX`, for example `GPDMA1 Channel 1` with request `LL_GPDMA1_REQUEST_UCPD1_RX`.
+- Direction must be peripheral-to-memory.
+- Source/peripheral increment disabled, destination/memory increment enabled.
+- Source and destination data width must be byte.
+- Enable `UCPD1_IRQn` and call `PD_BM_IRQHandler()` from `UCPD1_IRQHandler()`.
+- TX DMA is not required by this core, even if CubeMX generated a `UCPD1_TX` DMA channel.
+
+For STM32U5, the RX DMA callbacks look like this:
+
+```c
+/* USER CODE BEGIN PV */
+static uint16_t pd_app_rx_dma_size;
+/* USER CODE END PV */
+
+/* USER CODE BEGIN 0 */
+static void PD_App_RxDmaStart(uint8_t *buffer, uint16_t size, void *user)
+{
+  (void)user;
+
+  pd_app_rx_dma_size = size;
+
+  LL_DMA_DisableChannel(GPDMA1, LL_DMA_CHANNEL_1);
+  LL_DMA_SetSrcAddress(GPDMA1, LL_DMA_CHANNEL_1, (uint32_t)&UCPD1->RXDR);
+  LL_DMA_SetDestAddress(GPDMA1, LL_DMA_CHANNEL_1, (uint32_t)buffer);
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_1, size);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_1);
+}
+
+static void PD_App_RxDmaStop(void *user)
+{
+  (void)user;
+  LL_DMA_DisableChannel(GPDMA1, LL_DMA_CHANNEL_1);
+}
+
+static uint16_t PD_App_RxDmaCount(void *user)
+{
+  (void)user;
+  return (uint16_t)(pd_app_rx_dma_size -
+                    LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_1));
+}
+/* USER CODE END 0 */
+```
+
+Change `GPDMA1`, `LL_DMA_CHANNEL_1`, and `UCPD1` to match your CubeMX configuration. Use the `size` value passed into `PD_App_RxDmaStart()` as shown above; avoid hard-coding the receive buffer size in `PD_App_RxDmaCount()`.
+
+Dead-battery handoff has the same rule on U5 as on G4: if the board may be powered only from USB-C, call `HAL_PWREx_DisableUCPDDeadBattery()` after `PD_BM_Init()` has enabled the UCPD sink path. If your board is independently powered and you intentionally want to release DBCC earlier, that is a board-level choice, not a requirement of the PD core.
 
 ## Hardware Notes
 
