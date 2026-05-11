@@ -42,6 +42,24 @@ The request order is:
 
 If the profile is `9 V / 1 A` and the charger advertises `9 V / 2 A`, the source PDO matches and the request uses `2 A`.
 
+## Runtime Status
+
+After `PD_BM_GetState()` returns `PD_BM_STATE_READY`, the selected contract can be read with:
+
+```c
+uint8_t profile = PD_BM_GetActiveProfile();
+uint16_t voltage_mv = PD_BM_GetRequestedVoltage();
+uint16_t current_ma = PD_BM_GetRequestedCurrent();
+```
+
+`current_ma` is the negotiated source capability/current limit, not the real instantaneous load current. Measure the load current separately if your application needs actual consumption.
+
+The NUCLEO-G474RE example prints the selected contract once over the board COM port:
+
+```text
+USB-PD ready: profile=2, voltage=12000 mV, current=3000 mA
+```
+
 ## Porting To Another STM32 Project
 
 Copy only these two files if you want the reusable core:

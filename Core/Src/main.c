@@ -191,14 +191,22 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     static uint32_t led_last_tick = 0U;
+    static uint8_t pd_reported_profile = 0xFFU;
+    static uint16_t pd_reported_voltage_mv = 0U;
+    static uint16_t pd_reported_current_ma = 0U;
+    PD_BM_State pd_state;
     uint32_t led_interval = 0U;
 
     PD_BM_Task();
+    pd_state = PD_BM_GetState();
 
-    switch (PD_BM_GetState())
+    switch (pd_state)
     {
       case PD_BM_STATE_DETACHED:
         BSP_LED_Off(LED_GREEN);
+        pd_reported_profile = 0xFFU;
+        pd_reported_voltage_mv = 0U;
+        pd_reported_current_ma = 0U;
         break;
 
       case PD_BM_STATE_ATTACHED:
@@ -227,6 +235,24 @@ int main(void)
       default:
         led_interval = 50U;
         break;
+    }
+
+    if (pd_state == PD_BM_STATE_READY)
+    {
+      uint8_t active_profile = PD_BM_GetActiveProfile();
+      uint16_t voltage_mv = PD_BM_GetRequestedVoltage();
+      uint16_t current_ma = PD_BM_GetRequestedCurrent();
+
+      if ((active_profile != pd_reported_profile)
+          || (voltage_mv != pd_reported_voltage_mv)
+          || (current_ma != pd_reported_current_ma))
+      {
+        pd_reported_profile = active_profile;
+        pd_reported_voltage_mv = voltage_mv;
+        pd_reported_current_ma = current_ma;
+        printf("USB-PD ready: profile=%u, voltage=%u mV, current=%u mA\r\n",
+            active_profile, voltage_mv, current_ma);
+      }
     }
 
     if ((led_interval != 0U) && ((HAL_GetTick() - led_last_tick) >= led_interval))
