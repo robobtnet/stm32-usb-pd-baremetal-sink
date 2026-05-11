@@ -96,6 +96,7 @@ typedef struct
 } PD_BM_Config;
 
 uint8_t PD_BM_Init(const PD_BM_Config *config);
+uint8_t PD_BM_NeedsService(void);
 void PD_BM_Task(void);
 void PD_BM_IRQHandler(void);
 

@@ -67,6 +67,7 @@ static volatile PD_BM_State pd_state = PD_BM_STATE_DETACHED;
 static volatile uint8_t pd_rx_ready;
 static volatile uint8_t pd_request_pending;
 static volatile uint8_t pd_tx_busy;
+static volatile uint8_t pd_typec_event_pending;
 static volatile uint8_t pd_tx_msg_id;
 static volatile uint8_t pd_rx_count;
 static volatile uint8_t pd_active_cc;
@@ -161,6 +162,14 @@ uint8_t PD_BM_Init(const PD_BM_Config *config)
 
 void PD_BM_Task(void)
 {
+  if (pd_typec_event_pending != 0U)
+  {
+    __disable_irq();
+    pd_typec_event_pending = 0U;
+    __enable_irq();
+    PD_BM_HandleTypeCEvent();
+  }
+
   if (pd_state == PD_BM_STATE_DETACHED)
   {
     uint32_t cc1 = LL_UCPD_GetTypeCVstateCC1(pd_cfg.ucpd);
@@ -189,7 +198,7 @@ void PD_BM_Task(void)
       pd_attach_tick = 0U;
     }
   }
-  else if (PD_BM_IsActiveCCOpen() != 0U)
+  else if ((pd_state != PD_BM_STATE_READY) && (PD_BM_IsActiveCCOpen() != 0U))
   {
     PD_BM_Detach();
     return;
@@ -219,6 +228,35 @@ void PD_BM_Task(void)
   }
 }
 
+uint8_t PD_BM_NeedsService(void)
+{
+  if ((pd_cfg.ucpd == NULL) || (pd_cfg.get_tick_ms == NULL))
+  {
+    return 0U;
+  }
+
+  if ((pd_typec_event_pending != 0U) || (pd_rx_ready != 0U) || (pd_request_pending != 0U))
+  {
+    return 1U;
+  }
+
+  if ((pd_state == PD_BM_STATE_DETACHED) && (pd_attach_tick != 0U)
+      && ((PD_BM_Tick() - pd_attach_tick) >= pd_cfg.attach_debounce_ms))
+  {
+    return 1U;
+  }
+
+  if (((pd_state == PD_BM_STATE_ATTACHED) || (pd_state == PD_BM_STATE_RX_ACTIVITY))
+      && ((PD_BM_Tick() - pd_last_get_src_cap_tick) >= pd_cfg.get_source_cap_interval_ms)
+      && (pd_tx_busy == 0U)
+      && (pd_rx_ready == 0U))
+  {
+    return 1U;
+  }
+
+  return 0U;
+}
+
 void PD_BM_IRQHandler(void)
 {
   uint32_t sr = pd_cfg.ucpd->SR;
@@ -226,13 +264,13 @@ void PD_BM_IRQHandler(void)
   if ((sr & UCPD_SR_TYPECEVT1) != 0U)
   {
     LL_UCPD_ClearFlag_TypeCEventCC1(pd_cfg.ucpd);
-    PD_BM_HandleTypeCEvent();
+    pd_typec_event_pending = 1U;
   }
 
   if ((sr & UCPD_SR_TYPECEVT2) != 0U)
   {
     LL_UCPD_ClearFlag_TypeCEventCC2(pd_cfg.ucpd);
-    PD_BM_HandleTypeCEvent();
+    pd_typec_event_pending = 1U;
   }
 
   if ((sr & UCPD_SR_RXORDDET) != 0U)
@@ -374,6 +412,7 @@ static void PD_BM_ResetProtocol(void)
   pd_rx_ready = 0U;
   pd_request_pending = 0U;
   pd_tx_busy = 0U;
+  pd_typec_event_pending = 0U;
   pd_tx_msg_id = 0U;
   pd_rx_count = 0U;
   pd_active_cc = PD_CC_NONE;
@@ -409,6 +448,7 @@ static void PD_BM_EnableDetect(void)
       | UCPD_ICR_TYPECEVT2CF;
 
   pd_cfg.ucpd->IMR = UCPD_IMR_TYPECEVT1IE | UCPD_IMR_TYPECEVT2IE;
+  pd_typec_event_pending = 1U;
   pd_state = PD_BM_STATE_DETACHED;
 }
 

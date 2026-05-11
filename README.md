@@ -18,6 +18,7 @@ The PD core is intentionally independent from board-specific details. It does no
 - Tries optional profiles from highest index to lowest, then falls back to profile 0.
 - Profile current is a minimum requirement. If the source advertises more current at the same voltage, the request uses the source current.
 - RX uses an application-provided DMA callback.
+- Event-aware bare-metal service loop with `PD_BM_NeedsService()`.
 - TX is handled directly through the UCPD peripheral.
 - Optional DBCC/dead-battery handoff support in the application.
 
@@ -110,7 +111,7 @@ For a new STM32 project, you need these parts:
 4. Enable the UCPD interrupt.
 5. Add the UCPD IRQ hook in `stm32xxxx_it.c`.
 6. Add the board callbacks and `PD_BM_Config` setup in `main.c`.
-7. Call `PD_BM_Task()` continuously in the main loop.
+7. Call `PD_BM_Task()` from the main loop when `PD_BM_NeedsService()` reports work.
 8. Disable UCPD dead-battery mode after `PD_BM_Init()` if your MCU/family supports it.
 
 ## CubeMX / CubeIDE Configuration
@@ -380,12 +381,15 @@ Notes:
 
 ### 6. Call `PD_BM_Task()` In The Main Loop
 
-Minimal loop:
+Recommended event-aware loop:
 
 ```c
 while (1)
 {
-  PD_BM_Task();
+  if (PD_BM_NeedsService() != 0U)
+  {
+    PD_BM_Task();
+  }
 
   if (PD_BM_GetState() == PD_BM_STATE_READY)
   {
@@ -400,6 +404,8 @@ while (1)
 }
 ```
 
+You may still call `PD_BM_Task()` continuously in very small test projects, but `PD_BM_NeedsService()` is preferred for bare-metal applications that have other work to do. After the PD contract reaches `PD_BM_STATE_READY`, the core does not keep sending periodic PD messages; it normally wakes only for UCPD interrupts, detach/hard-reset handling, pending RX messages, or negotiation timing.
+
 Optional one-time UART report:
 
 ```c
@@ -407,7 +413,10 @@ static uint8_t pd_reported_profile = 0xFFU;
 static uint16_t pd_reported_voltage_mv = 0U;
 static uint16_t pd_reported_current_ma = 0U;
 
-PD_BM_Task();
+if (PD_BM_NeedsService() != 0U)
+{
+  PD_BM_Task();
+}
 
 if (PD_BM_GetState() == PD_BM_STATE_READY)
 {
@@ -524,7 +533,7 @@ Dead-battery handoff has the same rule on U5 as on G4: if the board may be power
 
 Only 5 V appears:
 
-- Check that `PD_BM_Task()` is called continuously.
+- Check that `PD_BM_Task()` is called when `PD_BM_NeedsService()` returns non-zero, or continuously during early debugging.
 - Check that `PD_BM_IRQHandler()` is called from the UCPD IRQ.
 - Check that UCPD global interrupt is enabled in NVIC.
 - Check that UCPD RX DMA is configured and that the callback uses the correct DMA channel.

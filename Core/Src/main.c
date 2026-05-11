@@ -197,7 +197,11 @@ int main(void)
     PD_BM_State pd_state;
     uint32_t led_interval = 0U;
 
-    PD_BM_Task();
+    if (PD_BM_NeedsService() != 0U)
+    {
+      PD_BM_Task();
+    }
+
     pd_state = PD_BM_GetState();
 
     switch (pd_state)
