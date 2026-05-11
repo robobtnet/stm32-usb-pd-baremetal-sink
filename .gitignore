@@ -1,0 +1,6 @@
+Debug/
+Release/
+*.launch
+*.best
+.claude/
+.settings/
