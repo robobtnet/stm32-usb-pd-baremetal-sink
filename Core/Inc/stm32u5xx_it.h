@@ -58,6 +58,7 @@ void SysTick_Handler(void);
 void EXTI13_IRQHandler(void);
 void GPDMA1_Channel0_IRQHandler(void);
 void GPDMA1_Channel1_IRQHandler(void);
+void TIM16_IRQHandler(void);
 void TIM17_IRQHandler(void);
 void UCPD1_IRQHandler(void);
 /* USER CODE BEGIN EFP */

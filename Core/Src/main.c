@@ -31,9 +31,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PD_APP_TRACE_QUEUE_LEN 512U
-#define PD_APP_TIMER_HZ 1000U
-#define PD_APP_TIMER_BASE_HZ 1000000U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -45,30 +42,10 @@
 
 COM_InitTypeDef BspCOMInit;
 
-/* USER CODE BEGIN PV */
-typedef struct
-{
-  const char *event;
-  uint32_t tick;
-  uint32_t a;
-  uint32_t b;
-  uint32_t c;
-  uint32_t d;
-} PD_AppTraceRecord;
-
-static uint16_t pd_app_rx_dma_size;
-static PD_AppTraceRecord pd_app_trace_queue[PD_APP_TRACE_QUEUE_LEN];
-static volatile uint16_t pd_app_trace_head;
-static volatile uint16_t pd_app_trace_tail;
-static volatile uint16_t pd_app_trace_lost;
 TIM_HandleTypeDef htim16;
 
-/*
- * Idle dwell required in DETACHED before we let the trace flush. Fast
- * hard-reset / re-attach cycles sit in DETACHED only briefly (~50 ms in the
- * 240 W cable log), so this threshold keeps printf out of those windows.
- */
-#define PD_APP_DETACH_FLUSH_IDLE_MS 500U
+/* USER CODE BEGIN PV */
+static uint16_t pd_app_rx_dma_size;
 
 /* USER CODE END PV */
 
@@ -79,14 +56,12 @@ static void MX_GPIO_Init(void);
 static void MX_GPDMA1_Init(void);
 static void MX_ICACHE_Init(void);
 static void MX_UCPD1_Init(void);
+static void MX_TIM16_Init(void);
 /* USER CODE BEGIN PFP */
 static uint32_t PD_App_GetTick(void *user);
 static void PD_App_RxDmaStart(uint8_t *buffer, uint16_t size, void *user);
 static void PD_App_RxDmaStop(void *user);
 static uint16_t PD_App_RxDmaCount(void *user);
-static void PD_App_Trace(const char *event, uint32_t a, uint32_t b, uint32_t c, uint32_t d, void *user);
-static void PD_App_TraceFlush(void);
-static void PD_App_TIM16_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -129,8 +104,8 @@ int main(void)
   MX_GPDMA1_Init();
   MX_ICACHE_Init();
   MX_UCPD1_Init();
+  MX_TIM16_Init();
   /* USER CODE BEGIN 2 */
-  PD_App_TIM16_Init();
   if (HAL_TIM_Base_Start_IT(&htim16) != HAL_OK)
   {
     Error_Handler();
@@ -142,39 +117,6 @@ int main(void)
   BSP_LED_Init(LED_GREEN);
   BSP_LED_Init(LED_BLUE);
   BSP_LED_Init(LED_RED);
-
-
-  static LL_UCPD_InitTypeDef pd_ucpd_init;
-  static PD_BM_Config pd_config;
-
-  LL_UCPD_StructInit(&pd_ucpd_init);
-
-  pd_config.ucpd = UCPD1;
-  pd_config.ucpd_init = &pd_ucpd_init;
-  pd_config.get_tick_ms = PD_App_GetTick;
-  pd_config.rx_dma_start = PD_App_RxDmaStart;
-  pd_config.rx_dma_stop = PD_App_RxDmaStop;
-  pd_config.rx_dma_count = PD_App_RxDmaCount;
-  pd_config.trace = PD_App_Trace;
-  pd_config.user = NULL;
-  pd_config.get_source_cap_interval_ms = 500U;
-  pd_config.attach_debounce_ms = 40U;
-
-  pd_config.profiles[0] = (PD_BM_Profile){ 5000U, 500U, 1U };
-  pd_config.profiles[1] = (PD_BM_Profile){ 9000U, 1000U, 1U };
-  pd_config.profiles[2] = (PD_BM_Profile){ 12000U, 1000U, 1U };
-  pd_config.profiles[3] = (PD_BM_Profile){ 15000U, 1000U, 1U };
-  pd_config.profiles[4] = (PD_BM_Profile){ 28000U, 3000U, 1U };
-
-  if (PD_BM_Init(&pd_config) == 0U)
-  {
-    BSP_LED_On(LED_RED);
-    Error_Handler();
-  }
-
-  BSP_LED_On(LED_BLUE);   /* یعنی init انجام شد */
-
-  HAL_PWREx_DisableUCPDDeadBattery();
 
   /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
   BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
@@ -190,7 +132,40 @@ int main(void)
     Error_Handler();
   }
 
-  printf("STM32U575 USB-PD sink start\r\n");
+  /* USER CODE BEGIN PD_App_Init */
+  {
+    static LL_UCPD_InitTypeDef pd_ucpd_init;
+    static PD_BM_Config pd_config;
+
+    LL_UCPD_StructInit(&pd_ucpd_init);
+
+    pd_config.ucpd = UCPD1;
+    pd_config.ucpd_init = &pd_ucpd_init;
+    pd_config.get_tick_ms = PD_App_GetTick;
+    pd_config.rx_dma_start = PD_App_RxDmaStart;
+    pd_config.rx_dma_stop = PD_App_RxDmaStop;
+    pd_config.rx_dma_count = PD_App_RxDmaCount;
+    pd_config.trace = NULL;
+    pd_config.user = NULL;
+    pd_config.get_source_cap_interval_ms = 500U;
+    pd_config.attach_debounce_ms = 40U;
+
+    pd_config.profiles[0] = (PD_BM_Profile){ 5000U, 500U, 1U };
+    pd_config.profiles[1] = (PD_BM_Profile){ 9000U, 1000U, 1U };
+    pd_config.profiles[2] = (PD_BM_Profile){ 12000U, 1000U, 1U };
+    pd_config.profiles[3] = (PD_BM_Profile){ 20000U, 1000U, 1U };
+    pd_config.profiles[4] = (PD_BM_Profile){ 28000U, 3000U, 1U };
+
+    if (PD_BM_Init(&pd_config) == 0U)
+    {
+      BSP_LED_On(LED_RED);
+      Error_Handler();
+    }
+
+    BSP_LED_On(LED_BLUE);
+    HAL_PWREx_DisableUCPDDeadBattery();
+  }
+  /* USER CODE END PD_App_Init */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -204,11 +179,11 @@ int main(void)
 	      static uint8_t pd_reported_profile = 0xFFU;
 	      static uint16_t pd_reported_voltage_mv = 0U;
 	      static uint16_t pd_reported_current_ma = 0U;
+	      static uint8_t pd_was_connected = 0U;
+	      static uint8_t pd_detach_reported = 0U;
 	      static uint32_t pd_detached_since_tick = 0U;
-	      static PD_BM_State pd_prev_state = PD_BM_STATE_DETACHED;
 	      PD_BM_State pd_state;
 	      uint32_t led_interval = 0U;
-	      uint8_t flush_allowed = 0U;
 
 	      if (PD_BM_NeedsService() != 0U)
 	      {
@@ -217,66 +192,32 @@ int main(void)
 
 	      pd_state = PD_BM_GetState();
 
-	      /*
-	       * Track how long we have been continuously DETACHED. Reset on any
-	       * other state so the idle counter is fresh after every reattach.
-	       */
 	      if (pd_state == PD_BM_STATE_DETACHED)
 	      {
-	        if (pd_prev_state != PD_BM_STATE_DETACHED)
+	        if (pd_was_connected != 0U)
 	        {
-	          pd_detached_since_tick = HAL_GetTick();
 	          if (pd_detached_since_tick == 0U)
 	          {
-	            pd_detached_since_tick = 1U;
+	            pd_detached_since_tick = HAL_GetTick();
+	            if (pd_detached_since_tick == 0U)
+	            {
+	              pd_detached_since_tick = 1U;
+	            }
+	          }
+	          else if ((pd_detach_reported == 0U)
+	              && ((HAL_GetTick() - pd_detached_since_tick) >= 500U))
+	          {
+	            pd_detach_reported = 1U;
+	            pd_was_connected = 0U;
+	            printf("USB-PD detached\r\n");
 	          }
 	        }
 	      }
 	      else
 	      {
+	        pd_was_connected = 1U;
+	        pd_detach_reported = 0U;
 	        pd_detached_since_tick = 0U;
-	      }
-	      pd_prev_state = pd_state;
-
-	      /*
-	       * Trace flush gating. printf at 115200 blocks for several ms per record,
-	       * which is well over the PD GoodCRC / SenderResponse / chunk timing
-	       * window. Keep traces buffered while a live contract is running:
-	       *   - READY:     SPR-only contract — EPR rejected / disabled
-	       *   - ERROR:     terminal failure
-	       *   - DETACHED:  but only after a debounce window, so the rapid
-	       *                hard-reset -> detach -> reattach cycle does not
-	       *                trigger printf in the middle of negotiation.
-	       *
-	       * Note: ATTACHED was previously in this whitelist. It is now
-	       * removed because SRC_CAP can arrive any moment after attach and
-	       * we cannot afford the ~5 ms blocking.
-	       * READY/EPR_READY are also excluded now; EPR_KeepAlive_Ack can
-	       * arrive at any time and still needs a fast GoodCRC.
-	       */
-	      if (PD_BM_NeedsService() == 0U)
-	      {
-	        switch (pd_state)
-	        {
-	          case PD_BM_STATE_ERROR:
-	            flush_allowed = 1U;
-	            break;
-	          case PD_BM_STATE_DETACHED:
-	            if ((pd_detached_since_tick != 0U)
-	                && ((HAL_GetTick() - pd_detached_since_tick)
-	                    >= PD_APP_DETACH_FLUSH_IDLE_MS))
-	            {
-	              flush_allowed = 1U;
-	            }
-	            break;
-	          default:
-	            break;
-	        }
-	      }
-
-	      if (flush_allowed != 0U)
-	      {
-	        PD_App_TraceFlush();
 	      }
 
 	      switch (pd_state)
@@ -331,8 +272,17 @@ int main(void)
 	          pd_reported_profile = active_profile;
 	          pd_reported_voltage_mv = voltage_mv;
 	          pd_reported_current_ma = current_ma;
-	          printf("USB-PD ready: profile=%u, voltage=%u mV, current=%u mA\r\n",
-	              active_profile, voltage_mv, current_ma);
+	          if ((pd_state == PD_BM_STATE_EPR_READY) && (active_profile == 4U)
+	              && (voltage_mv == 28000U))
+	          {
+	            printf("USB-PD ready: profile=%u, voltage=%u mV, current=%u mA\r\n",
+	                active_profile, voltage_mv, current_ma);
+	          }
+	          else
+	          {
+	            printf("USB-PD fallback: profile=%u, voltage=%u mV, current=%u mA\r\n",
+	                active_profile, voltage_mv, current_ma);
+	          }
 	        }
 	      }
 
@@ -356,7 +306,7 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE4) != HAL_OK)
+  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -368,8 +318,17 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_4;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_0;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+  RCC_OscInitStruct.PLL.PLLMBOOST = RCC_PLLMBOOST_DIV4;
+  RCC_OscInitStruct.PLL.PLLM = 3;
+  RCC_OscInitStruct.PLL.PLLN = 10;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLR = 1;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLLVCIRANGE_1;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -380,13 +339,13 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
                               |RCC_CLOCKTYPE_PCLK3;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB3CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -473,6 +432,38 @@ static void MX_ICACHE_Init(void)
 }
 
 /**
+  * @brief TIM16 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM16_Init(void)
+{
+
+  /* USER CODE BEGIN TIM16_Init 0 */
+
+  /* USER CODE END TIM16_Init 0 */
+
+  /* USER CODE BEGIN TIM16_Init 1 */
+
+  /* USER CODE END TIM16_Init 1 */
+  htim16.Instance = TIM16;
+  htim16.Init.Prescaler = 15999;
+  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim16.Init.Period = 2499;
+  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim16.Init.RepetitionCounter = 0;
+  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM16_Init 2 */
+
+  /* USER CODE END TIM16_Init 2 */
+
+}
+
+/**
   * @brief UCPD1 Initialization Function
   * @param None
   * @retval None
@@ -546,7 +537,7 @@ static void MX_UCPD1_Init(void)
   DMA_InitStruct.SrcDataWidth = LL_DMA_SRC_DATAWIDTH_BYTE;
   DMA_InitStruct.DestDataWidth = LL_DMA_DEST_DATAWIDTH_BYTE;
   DMA_InitStruct.SrcIncMode = LL_DMA_SRC_FIXED;
-  DMA_InitStruct.DestIncMode = LL_DMA_DEST_INCREMENT;
+  DMA_InitStruct.DestIncMode = LL_DMA_DEST_FIXED;
   DMA_InitStruct.Priority = LL_DMA_LOW_PRIORITY_LOW_WEIGHT;
   DMA_InitStruct.BlkDataLength = 0x00000000U;
   DMA_InitStruct.TriggerMode = LL_DMA_TRIGM_BLK_TRANSFER;
@@ -588,6 +579,7 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
@@ -597,54 +589,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-static void PD_App_TIM16_Init(void)
-{
-  RCC_ClkInitTypeDef clock_config;
-  uint32_t flash_latency;
-  uint32_t tim_clk_hz;
-  uint32_t prescaler;
-  uint32_t period;
-
-  HAL_RCC_GetClockConfig(&clock_config, &flash_latency);
-  (void)flash_latency;
-
-  tim_clk_hz = HAL_RCC_GetPCLK2Freq();
-  if (clock_config.APB2CLKDivider != RCC_HCLK_DIV1)
-  {
-    tim_clk_hz *= 2U;
-  }
-
-  prescaler = tim_clk_hz / PD_APP_TIMER_BASE_HZ;
-  if (prescaler == 0U)
-  {
-    prescaler = 1U;
-  }
-
-  period = (tim_clk_hz / prescaler) / PD_APP_TIMER_HZ;
-  if (period == 0U)
-  {
-    period = 1U;
-  }
-
-  __HAL_RCC_TIM16_CLK_ENABLE();
-
-  htim16.Instance = TIM16;
-  htim16.Init.Prescaler = prescaler - 1U;
-  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim16.Init.Period = period - 1U;
-  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim16.Init.RepetitionCounter = 0U;
-  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-
-  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  HAL_NVIC_SetPriority(TIM16_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(TIM16_IRQn);
-}
-
 static uint32_t PD_App_GetTick(void *user)
 {
   (void)user;
@@ -680,56 +624,6 @@ static uint16_t PD_App_RxDmaCount(void *user)
                     LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_1));
 }
 
-static void PD_App_Trace(const char *event, uint32_t a, uint32_t b, uint32_t c, uint32_t d, void *user)
-{
-  (void)user;
-  uint16_t head = pd_app_trace_head;
-  uint16_t next = (uint16_t)((head + 1U) % PD_APP_TRACE_QUEUE_LEN);
-
-  if (next == pd_app_trace_tail)
-  {
-    pd_app_trace_lost++;
-    return;
-  }
-
-  pd_app_trace_queue[head].event = event;
-  pd_app_trace_queue[head].tick = HAL_GetTick();
-  pd_app_trace_queue[head].a = a;
-  pd_app_trace_queue[head].b = b;
-  pd_app_trace_queue[head].c = c;
-  pd_app_trace_queue[head].d = d;
-  pd_app_trace_head = next;
-}
-
-static void PD_App_TraceFlush(void)
-{
-  /*
-   * Print AT MOST ONE record per call. This keeps each main-loop iteration
-   * short so PD_BM_NeedsService() can grab the CPU between printf bursts and
-   * service incoming RX / send GoodCRC within the PD timing window.
-   */
-  if (pd_app_trace_tail != pd_app_trace_head)
-  {
-    PD_AppTraceRecord record = pd_app_trace_queue[pd_app_trace_tail];
-    pd_app_trace_tail = (uint16_t)((pd_app_trace_tail + 1U) % PD_APP_TRACE_QUEUE_LEN);
-
-    printf("[PD] %lu %s a=%lu b=0x%08lX c=%lu d=%lu\r\n",
-        (unsigned long)record.tick,
-        record.event,
-        (unsigned long)record.a,
-        (unsigned long)record.b,
-        (unsigned long)record.c,
-        (unsigned long)record.d);
-    return;
-  }
-
-  if (pd_app_trace_lost != 0U)
-  {
-    uint16_t lost = pd_app_trace_lost;
-    pd_app_trace_lost = 0U;
-    printf("[PD] trace_lost count=%u\r\n", lost);
-  }
-}
 /* USER CODE END 4 */
 
 /**
@@ -783,8 +677,7 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* User can add his own implementation here. */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

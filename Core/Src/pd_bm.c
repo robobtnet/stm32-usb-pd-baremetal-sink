@@ -55,6 +55,7 @@
 #define PD_DEFAULT_DEBOUNCE_MS  40U
 #define PD_TX_BYTE_TIMEOUT_MS   2U
 #define PD_TX_MSG_TIMEOUT_MS    10U
+#define PD_CC_CHECK_INTERVAL_MS 50U
 #define PD_EPR_KEEPALIVE_MS     375U
 #define PD_EXT_CHUNK_SIZE       26U
 #define PD_EPR_FAIL_STREAK_MAX  4U
@@ -114,8 +115,13 @@ static volatile uint16_t pd_last_pdo_count;
 static volatile uint32_t pd_last_get_src_cap_tick;
 static volatile uint32_t pd_last_epr_keepalive_tick;
 static volatile uint32_t pd_attach_tick;
+static volatile uint32_t pd_last_cc_check_tick;
 static uint8_t pd_epr_fail_streak;
 static uint8_t pd_epr_negotiating;
+/* Per physical connection: keep failed EPR sources on SPR until CC opens. */
+static uint8_t pd_epr_suspended;
+static uint32_t pd_epr_suspended_src_pdo[PD_MAX_PDO_COUNT];
+static uint8_t pd_epr_suspended_src_pdo_count;
 
 static uint8_t pd_rx_buffer[PD_RX_BUFFER_SIZE];
 static uint8_t pd_msg_buffer[PD_RX_BUFFER_SIZE];
@@ -125,6 +131,8 @@ static volatile uint8_t pd_rx_queue_head;
 static volatile uint8_t pd_rx_queue_tail;
 static uint32_t pd_last_src_pdo[PD_MAX_PDO_COUNT];
 static uint8_t pd_last_src_pdo_count;
+static uint32_t pd_last_spr_src_pdo[PD_MAX_PDO_COUNT];
+static uint8_t pd_last_spr_src_pdo_count;
 static uint8_t pd_last_spec_rev = PD_SPEC_REV_30;
 static uint8_t pd_selected_position;
 static uint16_t pd_selected_current_10ma;
@@ -148,10 +156,15 @@ static uint16_t PD_BM_MakeHeader(uint8_t msg_type, uint8_t ndo, uint8_t msg_id, 
 static uint32_t PD_BM_ReadLE32(const uint8_t *buf);
 static void PD_BM_WriteLE16(uint8_t *buf, uint16_t value);
 static void PD_BM_WriteLE32(uint8_t *buf, uint32_t value);
-static void PD_BM_ResetProtocol(void);
+static uint8_t PD_BM_SourceCapsMatch(const uint32_t *pdo, uint8_t count,
+    const uint32_t *other_pdo, uint8_t other_count);
+static uint8_t PD_BM_SourceCapsMatchSuspendedSource(const uint32_t *pdo, uint8_t count);
+static void PD_BM_ClearEprSuspension(void);
+static void PD_BM_SuspendEprForCurrentSource(void);
+static void PD_BM_ResetProtocol(uint8_t preserve_epr_state);
 static void PD_BM_EnableDetect(void);
 static void PD_BM_Attach(PD_CC cc);
-static void PD_BM_Detach(void);
+static void PD_BM_Detach(uint8_t physical_detach);
 static void PD_BM_RxDMAArm(void);
 static void PD_BM_RxDMADisarm(void);
 static void PD_BM_ProcessMessage(void);
@@ -224,7 +237,7 @@ uint8_t PD_BM_Init(const PD_BM_Config *config)
   LL_UCPD_SetccEnable(pd_cfg.ucpd, LL_UCPD_CCENABLE_NONE);
   LL_UCPD_Enable(pd_cfg.ucpd);
 
-  PD_BM_ResetProtocol();
+  PD_BM_ResetProtocol(0U);
   PD_BM_EnableDetect();
 
   return 1U;
@@ -238,6 +251,18 @@ void PD_BM_Task(void)
     pd_typec_event_pending = 0U;
     __enable_irq();
     PD_BM_HandleTypeCEvent();
+  }
+
+  if ((pd_state != PD_BM_STATE_DETACHED)
+      && (PD_BM_TimedOut(pd_last_cc_check_tick, PD_CC_CHECK_INTERVAL_MS) != 0U))
+  {
+    pd_last_cc_check_tick = PD_BM_Tick();
+    if (PD_BM_IsActiveCCOpen() != 0U)
+    {
+      PD_TRACE("detach", pd_state, pd_requested_voltage_mv, pd_requested_current_ma, 0U);
+      PD_BM_Detach(1U);
+      return;
+    }
   }
 
   if (pd_state == PD_BM_STATE_DETACHED)
@@ -266,13 +291,9 @@ void PD_BM_Task(void)
     else
     {
       pd_attach_tick = 0U;
+      PD_BM_ClearEprSuspension();
+      pd_wants_epr = PD_BM_ConfigWantsEpr();
     }
-  }
-  else if ((pd_state != PD_BM_STATE_READY) && (pd_state != PD_BM_STATE_EPR_READY)
-      && (PD_BM_IsActiveCCOpen() != 0U))
-  {
-    PD_BM_Detach();
-    return;
   }
 
   if (pd_rx_ready != 0U)
@@ -355,6 +376,12 @@ uint8_t PD_BM_NeedsService(void)
     return 1U;
   }
 
+  if ((pd_state != PD_BM_STATE_DETACHED)
+      && (PD_BM_TimedOut(pd_last_cc_check_tick, PD_CC_CHECK_INTERVAL_MS) != 0U))
+  {
+    return 1U;
+  }
+
   if (((pd_state == PD_BM_STATE_ATTACHED) || (pd_state == PD_BM_STATE_RX_ACTIVITY))
       && ((PD_BM_Tick() - pd_last_get_src_cap_tick) >= pd_cfg.get_source_cap_interval_ms)
       && (pd_tx_busy == 0U)
@@ -420,11 +447,11 @@ void PD_BM_IRQHandler(void)
       pd_epr_fail_streak++;
       if (pd_epr_fail_streak >= PD_EPR_FAIL_STREAK_MAX)
       {
-        pd_wants_epr = 0U;
+        PD_BM_SuspendEprForCurrentSource();
         PD_TRACE("epr_disabled", pd_epr_fail_streak, 0U, 0U, 0U);
       }
     }
-    PD_BM_Detach();
+    PD_BM_Detach(0U);
   }
 
   if ((sr & UCPD_SR_RXOVR) != 0U)
@@ -507,6 +534,61 @@ static uint8_t PD_BM_ConfigWantsEpr(void)
   return 0U;
 }
 
+static uint8_t PD_BM_SourceCapsMatch(const uint32_t *pdo, uint8_t count,
+    const uint32_t *other_pdo, uint8_t other_count)
+{
+  if (count != other_count)
+  {
+    return 0U;
+  }
+
+  for (uint8_t i = 0U; i < count; i++)
+  {
+    if (pdo[i] != other_pdo[i])
+    {
+      return 0U;
+    }
+  }
+
+  return 1U;
+}
+
+static uint8_t PD_BM_SourceCapsMatchSuspendedSource(const uint32_t *pdo, uint8_t count)
+{
+  if (pd_epr_suspended_src_pdo_count == 0U)
+  {
+    return 1U;
+  }
+
+  return PD_BM_SourceCapsMatch(pdo, count,
+      pd_epr_suspended_src_pdo, pd_epr_suspended_src_pdo_count);
+}
+
+static void PD_BM_ClearEprSuspension(void)
+{
+  pd_epr_suspended = 0U;
+  pd_epr_fail_streak = 0U;
+  pd_epr_suspended_src_pdo_count = 0U;
+}
+
+static void PD_BM_SuspendEprForCurrentSource(void)
+{
+  pd_epr_suspended = 1U;
+  pd_epr_negotiating = 0U;
+  pd_epr_suspended_src_pdo_count = pd_last_spr_src_pdo_count;
+
+  if (pd_epr_suspended_src_pdo_count > PD_MAX_PDO_COUNT)
+  {
+    pd_epr_suspended_src_pdo_count = PD_MAX_PDO_COUNT;
+  }
+
+  if (pd_epr_suspended_src_pdo_count != 0U)
+  {
+    memcpy(pd_epr_suspended_src_pdo, pd_last_spr_src_pdo,
+        (uint32_t)pd_epr_suspended_src_pdo_count * sizeof(pd_last_spr_src_pdo[0]));
+  }
+}
+
 static uint16_t PD_BM_MakeHeader(uint8_t msg_type, uint8_t ndo, uint8_t msg_id, uint8_t spec_rev)
 {
   return (uint16_t)((msg_type & 0x1FU)
@@ -539,7 +621,7 @@ static void PD_BM_WriteLE32(uint8_t *buf, uint32_t value)
   buf[3] = (uint8_t)((value >> 24U) & 0xFFU);
 }
 
-static void PD_BM_ResetProtocol(void)
+static void PD_BM_ResetProtocol(uint8_t preserve_epr_state)
 {
   pd_rx_ready = 0U;
   pd_rx_queue_head = 0U;
@@ -563,7 +645,9 @@ static void PD_BM_ResetProtocol(void)
   pd_last_get_src_cap_tick = 0U;
   pd_last_epr_keepalive_tick = 0U;
   pd_attach_tick = 0U;
+  pd_last_cc_check_tick = 0U;
   pd_last_src_pdo_count = 0U;
+  pd_last_spr_src_pdo_count = 0U;
   pd_selected_position = 0U;
   pd_selected_current_10ma = 0U;
   pd_selected_pdo = 0U;
@@ -572,6 +656,10 @@ static void PD_BM_ResetProtocol(void)
   pd_source_unchunked_capable = 0U;
   pd_epr_mode_active = 0U;
   pd_epr_negotiating = 0U;
+  if (preserve_epr_state == 0U)
+  {
+    PD_BM_ClearEprSuspension();
+  }
   pd_last_spec_rev = PD_SPEC_REV_30;
 }
 
@@ -629,12 +717,17 @@ static void PD_BM_Attach(PD_CC cc)
       | UCPD_IMR_RXOVRIE | UCPD_IMR_RXMSGENDIE;
 
   pd_last_get_src_cap_tick = PD_BM_Tick();
+  pd_last_cc_check_tick = pd_last_get_src_cap_tick;
   pd_state = PD_BM_STATE_ATTACHED;
 }
 
-static void PD_BM_Detach(void)
+static void PD_BM_Detach(uint8_t physical_detach)
 {
-  PD_BM_ResetProtocol();
+  PD_BM_ResetProtocol((physical_detach == 0U) ? 1U : 0U);
+  if (physical_detach != 0U)
+  {
+    pd_wants_epr = PD_BM_ConfigWantsEpr();
+  }
   PD_BM_EnableDetect();
 }
 
@@ -748,6 +841,7 @@ static void PD_BM_ProcessMessage(void)
   if ((is_extended == 0U) && (ndo > 0U) && (msg_type == PD_DATA_SRC_CAP))
   {
     uint8_t count = ndo;
+    uint32_t src_pdo[PD_MAX_PDO_COUNT];
 
     if (count > PD_MAX_PDO_COUNT)
     {
@@ -775,20 +869,31 @@ static void PD_BM_ProcessMessage(void)
       uint8_t pdo_type;
       uint32_t volt_mv;
       uint32_t curr_ma;
-      pd_last_src_pdo[i] = PD_BM_ReadLE32(&pd_msg_buffer[2U + ((uint16_t)i * 4U)]);
-      pdo_type = (uint8_t)PD_PDO_TYPE(pd_last_src_pdo[i]);
-      volt_mv = (pdo_type == 0U) ? PD_PDO_FIXED_VOLT_MV(pd_last_src_pdo[i]) : 0U;
+      src_pdo[i] = PD_BM_ReadLE32(&pd_msg_buffer[2U + ((uint16_t)i * 4U)]);
+      pdo_type = (uint8_t)PD_PDO_TYPE(src_pdo[i]);
+      volt_mv = (pdo_type == 0U) ? PD_PDO_FIXED_VOLT_MV(src_pdo[i]) : 0U;
       curr_ma = (pdo_type == 0U)
-          ? ((uint32_t)PD_PDO_FIXED_CURR_10MA(pd_last_src_pdo[i]) * 10U)
+          ? ((uint32_t)PD_PDO_FIXED_CURR_10MA(src_pdo[i]) * 10U)
           : 0U;
-      PD_TRACE("spr_pdo", i + 1U, pd_last_src_pdo[i], volt_mv, curr_ma);
+      PD_TRACE("spr_pdo", i + 1U, src_pdo[i], volt_mv, curr_ma);
     }
 
-    pd_epr_source_capable = ((count > 0U) && (PD_PDO_TYPE(pd_last_src_pdo[0]) == 0U)
-        && (PD_PDO_FIXED_EPR_CAPABLE(pd_last_src_pdo[0]) != 0U)) ? 1U : 0U;
-    pd_source_unchunked_capable = ((count > 0U) && (PD_PDO_TYPE(pd_last_src_pdo[0]) == 0U)
-        && (PD_PDO_FIXED_UNCHUNKED_EXT(pd_last_src_pdo[0]) != 0U)) ? 1U : 0U;
-    PD_TRACE("spr_src_cap", count, pd_epr_source_capable, pd_wants_epr, pd_last_src_pdo[0]);
+    if ((pd_epr_suspended != 0U)
+        && (PD_BM_SourceCapsMatchSuspendedSource(src_pdo, count) == 0U))
+    {
+      PD_BM_ClearEprSuspension();
+    }
+
+    memcpy(pd_last_src_pdo, src_pdo, (uint32_t)count * sizeof(src_pdo[0]));
+    memcpy(pd_last_spr_src_pdo, src_pdo, (uint32_t)count * sizeof(src_pdo[0]));
+    pd_last_spr_src_pdo_count = count;
+
+    pd_epr_source_capable = ((count > 0U) && (PD_PDO_TYPE(src_pdo[0]) == 0U)
+        && (PD_PDO_FIXED_EPR_CAPABLE(src_pdo[0]) != 0U)) ? 1U : 0U;
+    pd_source_unchunked_capable = ((count > 0U) && (PD_PDO_TYPE(src_pdo[0]) == 0U)
+        && (PD_PDO_FIXED_UNCHUNKED_EXT(src_pdo[0]) != 0U)) ? 1U : 0U;
+
+    PD_TRACE("spr_src_cap", count, pd_epr_source_capable, pd_wants_epr, src_pdo[0]);
     PD_TRACE("spr_flags", pd_epr_source_capable, pd_source_unchunked_capable, 0U, 0U);
 
     pd_last_src_pdo_count = count;
@@ -797,7 +902,8 @@ static void PD_BM_ProcessMessage(void)
     pd_epr_mode_active = 0U;
     pd_selected_is_epr = 0U;
 
-    if ((pd_epr_source_capable != 0U) && (pd_wants_epr != 0U))
+    if ((pd_epr_source_capable != 0U) && (pd_wants_epr != 0U)
+        && (pd_epr_suspended == 0U))
     {
       if (PD_BM_SelectSprForEprEntry() != 0U)
       {
@@ -918,6 +1024,11 @@ static void PD_BM_ProcessMessage(void)
         {
           pd_request_pending = 1U;
         }
+        else if (PD_BM_SelectProfileFromSourceCaps((int8_t)(PD_BM_PROFILE_COUNT - 1U)) != 0U)
+        {
+          PD_BM_SuspendEprForCurrentSource();
+          pd_request_pending = 1U;
+        }
         else
         {
           pd_state = PD_BM_STATE_ERROR;
@@ -956,6 +1067,7 @@ static void PD_BM_ProcessMessage(void)
     else if (action == PD_EPR_ACT_ENTER_FAIL)
     {
       pd_epr_mode_active = 0U;
+      PD_BM_SuspendEprForCurrentSource();
       pd_state = (pd_requested_voltage_mv != 0U) ? PD_BM_STATE_READY : PD_BM_STATE_ERROR;
     }
     else if (action == PD_EPR_ACT_KEEPALIVE_ACK)
@@ -978,6 +1090,7 @@ static void PD_BM_ProcessMessage(void)
     {
       if ((pd_selected_is_epr == 0U) && (pd_epr_mode_active == 0U)
           && (pd_epr_source_capable != 0U) && (pd_wants_epr != 0U)
+          && (pd_epr_suspended == 0U)
           && (pd_requested_voltage_mv >= 20000U))
       {
         pd_state = PD_BM_STATE_PS_RDY_RX;
@@ -988,7 +1101,7 @@ static void PD_BM_ProcessMessage(void)
         pd_state = PD_BM_STATE_EPR_READY;
         pd_last_epr_keepalive_tick = PD_BM_Tick();
         pd_epr_negotiating = 0U;
-        pd_epr_fail_streak = 0U;
+        PD_BM_ClearEprSuspension();
       }
       else
       {
@@ -1004,6 +1117,10 @@ static void PD_BM_ProcessMessage(void)
   {
     PD_TRACE("reject_wait", msg_type, pd_selected_is_epr, pd_active_profile,
         pd_requested_voltage_mv);
+    if (pd_selected_is_epr != 0U)
+    {
+      PD_BM_SuspendEprForCurrentSource();
+    }
     if (PD_BM_RequestNextLowerProfile() != 0U)
     {
       pd_request_pending = 1U;
@@ -1159,7 +1276,8 @@ static void PD_BM_RequestProfile(uint8_t profile_index)
       | ((uint32_t)pd_selected_current_10ma << 10U)
       | ((uint32_t)pd_selected_current_10ma);
 
-  if ((pd_epr_source_capable != 0U) && (pd_wants_epr != 0U))
+  if ((pd_epr_source_capable != 0U) && (pd_wants_epr != 0U)
+      && (pd_epr_suspended == 0U))
   {
     rdo |= PD_RDO_EPR_CAPABLE;
   }
@@ -1595,7 +1713,7 @@ static void PD_BM_HandleTypeCEvent(void)
   if ((pd_state != PD_BM_STATE_DETACHED) && (PD_BM_IsActiveCCOpen() != 0U))
   {
     PD_TRACE("detach", pd_state, pd_requested_voltage_mv, pd_requested_current_ma, 0U);
-    PD_BM_Detach();
+    PD_BM_Detach(1U);
   }
 }
 
